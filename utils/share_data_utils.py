@@ -77,13 +77,40 @@ def __init_map(ticker: str) -> t.List[TimedFmv]:
             )
         df = pd.read_csv(historic_share_path)
 
+        # locate columns flexibly (some CSVs use 'Close/Last')
+        date_col = next((c for c in df.columns if c.strip().lower() == "date"), "Date")
+        close_col = next(
+            (c for c in df.columns if "close" in c.strip().lower()),
+            None,
+        )
+        if close_col is None:
+            raise AssertionError(f"No close column found in {historic_share_path}; cols={list(df.columns)}")
+
         for _, data in df.iterrows():
-            entry_time_in_ms = date_utils.parse_yyyy_mm_dd(data["Date"])[
-                "time_in_millis"
-            ]
-            ticker_price_map.append(
-                {"entry_time_in_millis": entry_time_in_ms, "fmv": data["Close"]}
-            )
+            raw_date = data[date_col]
+            # support common date formats: MM/DD/YYYY, YYYY-MM-DD, and named months
+            parsed = None
+            for parser in (date_utils.parse_mm_dd, date_utils.parse_yyyy_mm_dd, date_utils.parse_named_mon):
+                try:
+                    parsed = parser(str(raw_date))
+                    break
+                except Exception:
+                    continue
+            if parsed is None:
+                raise ValueError(f"Unable to parse date '{raw_date}' in {historic_share_path}")
+
+            entry_time_in_ms = parsed["time_in_millis"]
+
+            # normalize close value: strip $ and commas and convert to float
+            raw_close = data[close_col]
+            if isinstance(raw_close, str):
+                raw_close = raw_close.strip().replace("$", "").replace(",", "")
+            try:
+                fmv = float(raw_close)
+            except Exception:
+                raise ValueError(f"Unable to parse close value '{data[close_col]}' for date {raw_date}")
+
+            ticker_price_map.append({"entry_time_in_millis": entry_time_in_ms, "fmv": fmv})
 
         price_map_cache[ticker] = ticker_price_map
 
@@ -100,6 +127,9 @@ def get_fmv(ticker: str, purchase_time_in_ms: int) -> float:
         entry_time_in_ms = entry_data["entry_time_in_millis"]
         if entry_time_in_ms >= purchase_time_in_ms:
             if entry_time_in_ms > purchase_time_in_ms:
+                # if there's no previous entry, can't validate; return nearest available FMV
+                if previous_entry_data is None:
+                    return entry_data["fmv"]
                 previous_entry_time_in_ms = previous_entry_data["entry_time_in_millis"]
                 __validate_dates(
                     previous_entry_time_in_ms, purchase_time_in_ms, entry_time_in_ms

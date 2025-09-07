@@ -27,41 +27,101 @@ def __init_map(currency_code: str) -> RbiYearMonthRateMap:
         print(f"Parsing rbi rate for currency code = {currency_code}")
         currency_rate_map: RbiYearMonthRateMap = {}
         script_path = os.path.realpath(os.path.dirname(__file__))
-        rbi_rates_file_abs_path = os.path.join(
-            script_path,
-            os.pardir,
-            os.pardir,
-            "historic_data",
-            "rates",
-            "rbi",
-            "rates.xls",
-        )
+        # prefer rates.xls but fall back to BankWise.xls if present
+        rbi_dir = os.path.join(script_path, os.pardir, os.pardir, "historic_data", "rates", "rbi")
+        rbi_rates_file_abs_path = os.path.join(rbi_dir, "rates.xls")
+        if not os.path.exists(rbi_rates_file_abs_path):
+            alt = os.path.join(rbi_dir, "BankWise.xls")
+            if os.path.exists(alt):
+                rbi_rates_file_abs_path = alt
         if not os.path.exists(rbi_rates_file_abs_path):
             raise AssertionError(
                 f"RBI rates.xls {rbi_rates_file_abs_path} is NOT present"
             )
 
         with pd.ExcelFile(rbi_rates_file_abs_path, engine="openpyxl") as xl:
-            logger.debug_log("Currently parsing Reference Rates sheet")
-            sheet_pd = xl.parse(sheet_name="Reference Rates", skiprows=0, header=2)
-            for _, data in sheet_pd.iterrows():
-                if data["Currency Pairs"] == f"INR / 1 {currency_code.upper()}":
-                    rate_time = datetime.strptime(data["Date"], "%d %b %Y")
-                    if (
-                        rate_time.year not in currency_rate_map
-                        or rate_time.month not in currency_rate_map[rate_time.year]
-                        or currency_rate_map[rate_time.year][rate_time.month][
-                            "time_in_millis"
-                        ]
-                        < date_utils.epoch_in_ms(rate_time)
-                    ):
-                        currency_rate_map[rate_time.year] = currency_rate_map.get(
-                            rate_time.year, {}
-                        )
-                        currency_rate_map[rate_time.year][rate_time.month] = {
-                            "time_in_millis": date_utils.epoch_in_ms(rate_time),
-                            "rate": data["Rate"],
-                        }
+            logger.debug_log(f"Parsing RBI rates from {rbi_rates_file_abs_path}")
+            # if file is the provided rates.xls with a 'Reference Rates' sheet
+            try:
+                sheet_pd = xl.parse(sheet_name="Reference Rates", skiprows=0, header=2)
+                # expected columns: Date, Currency Pairs, Rate
+                for _, data in sheet_pd.iterrows():
+                    try:
+                        if data.get("Currency Pairs") == f"INR / 1 {currency_code.upper()}":
+                            rate_time = datetime.strptime(str(data["Date"]), "%d %b %Y")
+                            rate_val = data.get("Rate")
+                            # normalize rate
+                            if isinstance(rate_val, str):
+                                rate_val = float(rate_val.replace(",", ""))
+                            if (
+                                rate_time.year not in currency_rate_map
+                                or rate_time.month not in currency_rate_map[rate_time.year]
+                                or currency_rate_map[rate_time.year][rate_time.month]["time_in_millis"]
+                                < date_utils.epoch_in_ms(rate_time)
+                            ):
+                                currency_rate_map[rate_time.year] = currency_rate_map.get(rate_time.year, {})
+                                currency_rate_map[rate_time.year][rate_time.month] = {
+                                    "time_in_millis": date_utils.epoch_in_ms(rate_time),
+                                    "rate": float(rate_val),
+                                }
+                    except Exception:
+                        # skip malformed rows
+                        continue
+            except ValueError:
+                # fallback: some sources provide a simple table like BankWise.xls with Date,USD,GBP,EURO,YEN
+                sheet_pd = xl.parse(sheet_name=0)
+                # find the column matching currency
+                col_map = {c.strip().upper(): c for c in sheet_pd.columns}
+                target_col = None
+                # map common currency codes/names
+                for key in (currency_code.upper(), "USD", "GBP", "EURO", "YEN"):
+                    if key in col_map:
+                        target_col = col_map[key]
+                        break
+                if target_col is None:
+                    # try common headers like 'USD'
+                    for c in sheet_pd.columns:
+                        if currency_code.upper() in c.upper() or c.strip().upper() in ("USD","GBP","EURO","YEN"):
+                            target_col = c
+                            break
+                if target_col is None:
+                    raise AssertionError(f"No column for currency {currency_code} in {rbi_rates_file_abs_path}")
+
+                for _, data in sheet_pd.iterrows():
+                    try:
+                        raw_date = data.get("Date") or data.get("date") or data.get(sheet_pd.columns[0])
+                        # support dd/mm/YYYY or dd-mm-YYYY or dd/mm/yy
+                        parsed = None
+                        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%b-%Y"):
+                            try:
+                                rate_time = datetime.strptime(str(raw_date), fmt)
+                                parsed = True
+                                break
+                            except Exception:
+                                continue
+                        if not parsed:
+                            # try if it's already a datetime
+                            if isinstance(raw_date, datetime):
+                                rate_time = raw_date
+                            else:
+                                continue
+
+                        rate_val = data.get(target_col)
+                        if isinstance(rate_val, str):
+                            rate_val = float(rate_val.replace(",", "").replace("$", ""))
+                        if (
+                            rate_time.year not in currency_rate_map
+                            or rate_time.month not in currency_rate_map[rate_time.year]
+                            or currency_rate_map[rate_time.year][rate_time.month]["time_in_millis"]
+                            < date_utils.epoch_in_ms(rate_time)
+                        ):
+                            currency_rate_map[rate_time.year] = currency_rate_map.get(rate_time.year, {})
+                            currency_rate_map[rate_time.year][rate_time.month] = {
+                                "time_in_millis": date_utils.epoch_in_ms(rate_time),
+                                "rate": float(rate_val),
+                            }
+                    except Exception:
+                        continue
 
             rate_map_cache[currency_code] = currency_rate_map
 

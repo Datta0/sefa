@@ -134,6 +134,8 @@ def parse_org_purchases(
             "ZIP Code",
             "Nature of Entity",
             "Date of acquiring the interest",
+            # explicit ITR field: total gross amount paid/credited during the period (INR)
+            "Total gross amount paid/credited with respect to the holding during the period",
             "Initial value of the investment",
             "Peak value of the investment during the Period",
             "Closing Value",
@@ -146,6 +148,9 @@ def parse_org_purchases(
                 entry.org.zip_code,
                 entry.org.nature,
                 entry.purchase.date["disp_time"],
+                # purchase_price is already computed in INR for each entry
+                round(entry.purchase_price),
+                # keep original 'Initial value' for backward compatibility (duplicate of purchase_price)
                 round(entry.purchase_price),
                 round(entry.peak_price),
                 round(entry.closing_price),
