@@ -14,6 +14,12 @@ def debug_log_json(obj):
         __print_json(obj)
 
 
+def set_debug(enabled: bool):
+    """Enable or disable debug logging programmatically."""
+    global DEBUG
+    DEBUG = bool(enabled)
+
+
 def log_json(obj):
     __print_json(obj)
 

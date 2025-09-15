@@ -84,6 +84,12 @@ def parse_org_purchases(
                 * rbi_rates_utils.get_rate_for_prev_mon_for_time_in_ms(
                     currency_code, start_time_in_ms
                 ),
+                # compute peak price in INR correctly: find the date-wise max of
+                # (FMV * INR rate) within the period. Previously we took the
+                # peak USD FMV and multiplied it with the purchase month's FX
+                # rate which could make the peak INR smaller than the initial
+                # INR value if FX moved unfavourably. Use helper that returns
+                # the effective peak in INR directly.
                 peak_price=previous_sum
                 * share_data_utils.get_peak_price_in_inr(
                     ticker, start_time_in_ms, end_time_in_ms
@@ -97,11 +103,27 @@ def parse_org_purchases(
             FAA3(
                 org,
                 purchase=purchase,
-                peak_price=purchase.quantity
-                * share_data_utils.get_peak_price_in_inr(
-                    ticker,
-                    purchase.date["time_in_millis"],
-                    end_time_in_ms,
+                # compute peak price in INR for the holding: find the maximum
+                # (FMV * INR rate) between purchase date and period end. This
+                # ensures peak reflects both price and FX movement correctly.
+                # For a given purchase we should consider peak only after the
+                # stock is acquired (i.e. strictly after the purchase date).
+                # Use the next day as the start; if that falls outside the
+                # reporting period (e.g. purchase on the last day) fall back
+                # to the purchase price as the effective peak.
+                peak_price=(
+                    purchase.quantity
+                    * share_data_utils.get_peak_price_in_inr(
+                        ticker,
+                        purchase.date["time_in_millis"] + date_utils.ONE_DAY_IN_MS,
+                        end_time_in_ms,
+                    )
+                    if purchase.date["time_in_millis"] + date_utils.ONE_DAY_IN_MS <= end_time_in_ms
+                    else purchase.quantity
+                    * purchase.purchase_fmv.price
+                    * rbi_rates_utils.get_rate_for_prev_mon_for_time_in_ms(
+                        currency_code, purchase.date["time_in_millis"]
+                    )
                 ),
                 purchase_price=purchase.quantity
                 * purchase.purchase_fmv.price

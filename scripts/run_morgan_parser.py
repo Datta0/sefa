@@ -16,6 +16,7 @@ if PROJECT_ROOT not in sys.path:
 
 from parser.demat.morgan_stanley import morgan_stanley_rsu_parser as parser
 from utils import file_utils
+from utils import logger
 
 
 def purchase_to_dict(p):
@@ -32,7 +33,11 @@ def main():
     ap.add_argument("--input", required=True, help="Input xlsx/csv file")
     ap.add_argument("--out", required=True, help="Output directory")
     ap.add_argument("--ticker", required=False, help="Ticker to use if the sheet lacks a Symbol column")
+    ap.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
     args = ap.parse_args()
+
+    if args.verbose:
+        logger.set_debug(True)
 
     purchases = parser.parse(args.input, args.out, ticker=(args.ticker.lower() if args.ticker else None))
 

@@ -121,9 +121,12 @@ def get_fmv(ticker: str, purchase_time_in_ms: int) -> float:
     logger.debug_log(
         f"{ticker}: Querying FMV at {date_utils.display_time(purchase_time_in_ms)}"
     )
-
     previous_entry_data = None
-    for entry_data in __init_map(ticker):
+    # Ensure we iterate the price map in ascending time order so that
+    # `previous_entry_data` semantically represents the last available
+    # historical price before `purchase_time_in_ms`. CSVs may be newest-first
+    # which would break the previous logic.
+    for entry_data in sorted(__init_map(ticker), key=lambda e: e["entry_time_in_millis"]):
         entry_time_in_ms = entry_data["entry_time_in_millis"]
         if entry_time_in_ms >= purchase_time_in_ms:
             if entry_time_in_ms > purchase_time_in_ms:
@@ -169,48 +172,84 @@ def get_peak_price_in_inr(
             + f"than equal to end_time_in_ms = {end_time_in_ms}"
         )
 
-    price_map = list(
-        filter(
-            lambda price: price["entry_time_in_millis"] <= end_time_in_ms
-            and price["entry_time_in_millis"] >= start_time_in_ms,
-            sorted(
-                __init_map(ticker),
-                key=lambda price: price["entry_time_in_millis"],
-                reverse=True,
-            ),
+    # filter and sort ascending (older -> newer) so per-day INR calculations are consistent
+    price_map = [
+        p
+        for p in sorted(__init_map(ticker), key=lambda price: price["entry_time_in_millis"])
+        if p["entry_time_in_millis"] >= start_time_in_ms and p["entry_time_in_millis"] <= end_time_in_ms
+    ]
+
+    if not price_map:
+        raise AssertionError(
+            f"No price data for ticker={ticker} between {date_utils.display_time(start_time_in_ms)} and {date_utils.display_time(end_time_in_ms)}"
         )
-    )
-    price_map_with_inr_rate: t.Iterator[TimedFmvWithInrRate] = map(
-        lambda price: {
+
+    # build list of per-day values with INR conversion applied per-day
+    enriched = []
+    for price in price_map:
+        inr_rate = rbi_rates_utils.get_rate_for_prev_mon_for_time_in_ms(
+            ticker_currency_info[ticker], price["entry_time_in_millis"]
+        )
+        enriched.append({
             **price,
-            "inr_rate": rbi_rates_utils.get_rate_for_prev_mon_for_time_in_ms(
-                ticker_currency_info[ticker], price["entry_time_in_millis"]
-            ),
-        },
-        price_map,
-    )
+            "inr_rate": inr_rate,
+            "effective_inr": price["fmv"] * inr_rate,
+        })
 
-    max_value = max(
-        price_map_with_inr_rate, key=lambda price: price["fmv"] * price["inr_rate"]
-    )
-
-    peak_price_in_inr = max_value["fmv"] * max_value["inr_rate"]
-
+    # debug output: full per-day breakdown
     logger.debug_log_json(
         {
+            "ticker": ticker,
             "start_time": date_utils.display_time(start_time_in_ms),
             "end_time": date_utils.display_time(end_time_in_ms),
-            "max_fmv($)": max_value["fmv"],
-            "max_fmv($)_at": date_utils.display_time(max_value["entry_time_in_millis"]),
-            "inr_conversion_rate": max_value["inr_rate"],
-            "effective_price(INR)": peak_price_in_inr,
+            "per_day": [
+                {
+                    "date": date_utils.display_time(p["entry_time_in_millis"]),
+                    "fmv_usd": p["fmv"],
+                    "inr_rate": p["inr_rate"],
+                    "effective_inr": p["effective_inr"],
+                }
+                for p in enriched
+            ],
         }
     )
+
+    # pick the day with highest effective_inr
+    max_value = max(enriched, key=lambda p: p["effective_inr"])
+    peak_price_in_inr = max_value["effective_inr"]
 
     logger.log(
         f"Peak price for ticker = {ticker} from {date_utils.display_time(start_time_in_ms)} "
         + f"to {date_utils.display_time(end_time_in_ms)} is {peak_price_in_inr} "
-        + f"INR at rate {max_value['inr_rate']} INR/USD"
+        + f"INR (USD {max_value['fmv']} on {date_utils.display_time(max_value['entry_time_in_millis'])} at rate {max_value['inr_rate']})"
     )
 
-    return max_value["fmv"] * max_value["inr_rate"]
+    return peak_price_in_inr
+
+
+def get_peak_fmv(ticker: str, start_time_in_ms: int, end_time_in_ms: int) -> float:
+    """Return peak FMV in the share's currency (USD) between start and end (inclusive).
+
+    This mirrors the filtering used in get_peak_price_in_inr but returns the USD FMV
+    without converting to INR. Caller can decide which FX rate to apply.
+    """
+    if start_time_in_ms > end_time_in_ms:
+        raise AssertionError(
+            f"start_time_in_ms = {start_time_in_ms} is greater "
+            + f"than equal to end_time_in_ms = {end_time_in_ms}"
+        )
+
+    price_map = list(
+        filter(
+            lambda price: price["entry_time_in_millis"] <= end_time_in_ms
+            and price["entry_time_in_millis"] >= start_time_in_ms,
+            sorted(__init_map(ticker), key=lambda price: price["entry_time_in_millis"], reverse=True),
+        )
+    )
+    if not price_map:
+        raise AssertionError(
+            f"No price data for ticker={ticker} between {date_utils.display_time(start_time_in_ms)} and {date_utils.display_time(end_time_in_ms)}"
+        )
+
+    max_value = max(price_map, key=lambda price: price["fmv"])
+    return max_value["fmv"]

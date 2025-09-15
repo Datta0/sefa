@@ -19,6 +19,9 @@ if PROJECT_ROOT not in sys.path:
 
 from parser.demat.morgan_stanley import morgan_stanley_rsu_parser as ms_parser
 from parser.itr import faa3_parser
+from utils import logger
+import json
+from models.purchase import Purchase, Price
 
 
 def main():
@@ -28,10 +31,32 @@ def main():
     ap.add_argument("--ticker", required=True, help="Ticker for the holdings (e.g., goog)")
     ap.add_argument("--calendar-mode", choices=["calendar","financial"], default="calendar")
     ap.add_argument("--assessment-year", type=int, default=datetime.now().year, help="Assessment year used for ITR computations")
+    ap.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
     args = ap.parse_args()
 
-    # parse purchases
-    purchases = ms_parser.parse(args.input, args.out, ticker=args.ticker)
+    if args.verbose:
+        logger.set_debug(True)
+
+    # parse purchases or load pre-parsed JSON
+    if str(args.input).lower().endswith('.json'):
+        # expect a list of purchase dicts as produced by run_morgan_parser
+        with open(args.input) as f:
+            data = json.load(f)
+        purchases = [
+            Purchase(
+                date=d['date'],
+                purchase_fmv=Price(
+                    d['purchase_fmv'].get('price') or d['purchase_fmv'].get('price', 0),
+                    d['purchase_fmv'].get('currency_code') or d['purchase_fmv'].get('currency') or 'USD',
+                ),
+                quantity=d['quantity'],
+                ticker=d['ticker'],
+            )
+            for d in data
+        ]
+    else:
+        # parse purchases from Morgan Stanley xlsx/csv
+        purchases = ms_parser.parse(args.input, args.out, ticker=args.ticker)
 
     if not purchases:
         print("No purchases parsed; aborting FAA3 conversion.")
